@@ -263,6 +263,23 @@ def plot_work(data_training_accumulated, devices, output_folder, ids):
     plt.savefig(output_folder / "work.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
+def format_delta(delta, components=3):
+    days = delta.days
+    total_seconds = delta.seconds
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    parts = [
+        ("days",    days),
+        ("hours",   hours),
+        ("minutes", minutes),
+        ("seconds", seconds),
+    ]
+    while len(parts) > 1 and parts[0][1] == 0:
+        parts.pop(0)
+    parts = parts[:components]
+    return ", ".join(f"{value} {name}" for name, value in parts)
+
 def plot_all():
     """Führt alle Plot-Funktionen aus."""
     user_id = ms['id']
@@ -319,9 +336,24 @@ def plot_all():
                 data_device["work"].sum(),
             ]
     # Konvertierung in DateTime
-    data["time"] = pd.to_datetime(data["time"], unit='s')
-    data["training"] = pd.to_datetime(data["training"], unit='s')
-    data_training_accumulated["training"] = pd.to_datetime(data_training_accumulated["training"], unit='s')
+    local_tz = datetime.datetime.now().astimezone().tzinfo
+    data["time"] = pd.to_datetime(data["time"], unit='s', utc=True).dt.tz_convert(local_tz)
+    data["training"] = pd.to_datetime(data["training"], unit='s', utc=True).dt.tz_convert(local_tz)
+    data_training_accumulated["training"] = pd.to_datetime(data_training_accumulated["training"], unit='s', utc=True).dt.tz_convert(local_tz)
+
+    num_trainings = len(data["training"].unique())
+    print(f"Total number of trainings: {num_trainings}")
+    print(f"Total reps: {data['moves'].sum()}")
+    now = datetime.datetime.now(local_tz)
+    first_training = data["training"].min()
+    print(f"First training: {first_training} ({format_delta(now - first_training)} ago)")
+    last_training = data["training"].max()
+    print(f"Last training: {last_training} ({format_delta(now - last_training)} ago)")
+    print(f"Average time between trainings: {format_delta((last_training - first_training) / num_trainings)}")
+    print(f"Total work: {data['work'].sum() / 3600:.2f} kWh")
+    total_duration = datetime.timedelta(seconds=int(data["duration"].sum()))
+    print(f"Total active time: {format_delta(total_duration)}")
+    print(f"Active time per training: {format_delta(total_duration / num_trainings)}")
 
     # Aufruf der einzelnen Plot-Funktionen
     plot_weights(data, devices, output_folder, ids)
