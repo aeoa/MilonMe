@@ -296,7 +296,7 @@ def plot_all():
     data = pd.DataFrame(columns=["training", "set", "device", "time", "duration", "moves", "concentric", "eccentric", "work"])
     premium_stats_folder = DATA_FOLDER / ms['id'] / 'stats' / 'premium'
     for file_path in sorted(premium_stats_folder.glob("*.json")): 
-        print(f"Processing {file_path}")
+        # print(f"Processing {file_path}")
         with open(file_path, 'r') as file:
             jsondata = json.load(file)
         for training in jsondata["stats"]:
