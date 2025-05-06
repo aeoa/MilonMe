@@ -263,6 +263,39 @@ def plot_work(data_training_accumulated, devices, output_folder, ids):
     plt.savefig(output_folder / "work.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
+def plot_total_work_of_entire_training(data_training_accumulated, devices, output_folder, ids):
+    fig, ax = plt.subplots()
+    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+    fig.set_size_inches(16, 9)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.yaxis.get_major_locator().set_params(integer=True)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    # Identify trainings where all devices have uniform set counts
+    valid_3 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
+    trainings_3 = valid_3[valid_3].index
+    valid_2 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
+    trainings_2 = valid_2[valid_2].index
+
+    # Sum total work for those uniform trainings
+    total_3 = data_training_accumulated[
+        data_training_accumulated["training"].isin(trainings_3)
+    ].groupby("training")["work"].sum()
+    total_2 = data_training_accumulated[
+        data_training_accumulated["training"].isin(trainings_2)
+    ].groupby("training")["work"].sum()
+
+    # Plot only the consistent 3-set and 2-set trainings
+    ax.plot(total_3.index, total_3.values, label="3 sets")
+    ax.plot(total_2.index, total_2.values, label="2 sets")
+    ax.set_title("Total Work")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Work / kWs")
+    ax.legend(loc='lower right')
+    plt.savefig(output_folder / "total_work.png", dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
 def format_delta(delta, components=3):
     days = delta.days
     total_seconds = delta.seconds
@@ -360,6 +393,7 @@ def plot_all():
     plot_delta_percentage(data, devices, output_folder, ids)
     plot_reps(data, devices, output_folder, ids)
     plot_work(data_training_accumulated, devices, output_folder, ids)
+    plot_total_work_of_entire_training(data_training_accumulated, devices, output_folder, ids)
 
 def main():
     # delete_session()
