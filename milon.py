@@ -236,8 +236,7 @@ def plot_reps(data, devices, output_folder, ids):
     plt.savefig(output_folder / "reps.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_work(data_training_accumulated, devices, output_folder, ids):
-    """Plottet Work anhand von 2 oder 3 Sätzen und speichert work.png"""
+def plot_work_individual(data_training_accumulated, devices, output_folder, ids):
     fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True)
     fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
     fig.set_size_inches(16, 9)
@@ -260,40 +259,110 @@ def plot_work(data_training_accumulated, devices, output_folder, ids):
         if col == 0:
             ax.set_ylabel("Work / kWs")
         ax.legend(loc='lower right')
-    plt.savefig(output_folder / "work.png", dpi=300, bbox_inches='tight')
+    plt.savefig(output_folder / "work_individual.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_total_work_of_entire_training(data_training_accumulated, devices, output_folder, ids):
-    fig, ax = plt.subplots()
-    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-    fig.set_size_inches(16, 9)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-    ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.yaxis.get_major_locator().set_params(integer=True)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    # Identify trainings where all devices have uniform set counts
-    valid_3 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
-    trainings_3 = valid_3[valid_3].index
-    valid_2 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
-    trainings_2 = valid_2[valid_2].index
+def plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids):
+        # Collect and map muscle groups to device names
+        mg_to_names = {}
+        for device_id in ids:
+            mg = devices[str(device_id)]["mg"]
+            name = devices[str(device_id)]["name"]
+            mg_to_names.setdefault(mg, set()).add(name)
+        # Convert sets to sorted lists
+        for mg in mg_to_names:
+            mg_to_names[mg] = sorted(mg_to_names[mg])
+        
+        # Collect the muscle groups for the given device ids
+        muscle_groups = sorted({devices[str(device_id)]["mg"] for device_id in ids})
+        total_plots = 1 + len(muscle_groups)  # one overall plot + one per muscle group
 
-    # Sum total work for those uniform trainings
-    total_3 = data_training_accumulated[
-        data_training_accumulated["training"].isin(trainings_3)
-    ].groupby("training")["work"].sum()
-    total_2 = data_training_accumulated[
-        data_training_accumulated["training"].isin(trainings_2)
-    ].groupby("training")["work"].sum()
+        # Use a 2d grid with 2 columns
+        nrows = 2
+        ncols = (total_plots + nrows - 1) // nrows
 
-    # Plot only the consistent 3-set and 2-set trainings
-    ax.plot(total_3.index, total_3.values, label="3 sets")
-    ax.plot(total_2.index, total_2.values, label="2 sets")
-    ax.set_title("Total Work")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Work / kWs")
-    ax.legend(loc='lower right')
-    plt.savefig(output_folder / "total_work.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
+        # Create a figure with subplots arranged in a grid
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True)
+        fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+        fig.set_size_inches(16, 9)
+
+        for ax in axes.flat:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator())
+            ax.yaxis.get_major_locator().set_params(integer=True)
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+            ax.set_visible(False)
+
+        # ----- Plot 1: Total Work for All Devices -----
+        valid_3 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
+        trainings_3 = valid_3[valid_3].index
+        valid_2 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
+        trainings_2 = valid_2[valid_2].index
+
+        total_3 = data_training_accumulated[
+            data_training_accumulated["training"].isin(trainings_3)
+        ].groupby("training")["work"].sum()
+        total_2 = data_training_accumulated[
+            data_training_accumulated["training"].isin(trainings_2)
+        ].groupby("training")["work"].sum()
+
+        idx = 0
+        row = idx // axes.shape[1]
+        col = idx % axes.shape[1]
+        ax = axes[row, col]
+        ax.set_visible(True)
+        ax.plot(total_3.index, total_3.values, label="3 sets")
+        ax.plot(total_2.index, total_2.values, label="2 sets")
+        ax.set_title("Total Work (All Devices)")
+        if row == axes.shape[0] - 1:
+            ax.set_xlabel("Time")
+        if col == 0:
+            ax.set_ylabel("Work / kWs")
+        ax.legend(loc='lower right')
+        idx += 1
+
+        # ----- Plot 2+: Total Work per Muscle Group -----
+        for mg in muscle_groups:
+            row = idx // axes.shape[1]
+            col = idx % axes.shape[1]
+            ax = axes[row, col]
+            ax.set_visible(True)
+
+            # Get device ids corresponding to the current muscle group
+            mg_device_ids = [device_id for device_id in ids if devices[str(device_id)]["mg"] == mg]
+            mg_data = data_training_accumulated[data_training_accumulated["device"].isin(mg_device_ids)]
+            if mg_data.empty:
+                ax.set_title(f"{mg.capitalize()} (no devices)")
+                ax.set_xlabel("Time")
+                ax.set_ylabel("Work / kWs")
+                idx += 1
+                continue
+
+            valid_3_mg = mg_data.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
+            trainings_3_mg = valid_3_mg[valid_3_mg].index
+            valid_2_mg = mg_data.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
+            trainings_2_mg = valid_2_mg[valid_2_mg].index
+
+            total_3_mg = mg_data[
+            mg_data["training"].isin(trainings_3_mg)
+            ].groupby("training")["work"].sum()
+            total_2_mg = mg_data[
+            mg_data["training"].isin(trainings_2_mg)
+            ].groupby("training")["work"].sum()
+
+            ax.plot(total_3_mg.index, total_3_mg.values, label="3 sets")
+            ax.plot(total_2_mg.index, total_2_mg.values, label="2 sets")
+            device_names = ", ".join(mg_to_names[mg])
+            ax.set_title(f"{mg.capitalize()} ({device_names})")
+            if row == axes.shape[0] - 1:
+                ax.set_xlabel("Time")
+            if col == 0:
+                ax.set_ylabel("Work / kWs")
+            ax.legend(loc='lower right')
+            idx += 1
+
+        plt.savefig(output_folder / "work_muscle_group.png", dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
 
 def format_delta(delta, components=3):
@@ -392,8 +461,8 @@ def plot_all():
     plot_weights(data, devices, output_folder, ids)
     plot_delta_percentage(data, devices, output_folder, ids)
     plot_reps(data, devices, output_folder, ids)
-    plot_work(data_training_accumulated, devices, output_folder, ids)
-    plot_total_work_of_entire_training(data_training_accumulated, devices, output_folder, ids)
+    plot_work_individual(data_training_accumulated, devices, output_folder, ids)
+    plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids)
 
 def main():
     # delete_session()
