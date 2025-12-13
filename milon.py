@@ -22,7 +22,7 @@ ms = None
 
 def perform_login():
     print("Login to MilonMe")
-    email = input("E-Mail: "),
+    email = input("E-Mail: ")
     password = getpass("Password: ")
 
     rs = requests.Session()
