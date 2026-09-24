@@ -4,15 +4,13 @@ import requests
 import json
 import os
 from getpass import getpass
-import datetime
 import pathlib
 
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from collections import defaultdict
+from milon_api import HOST, download_all
+from training_plots import PLOT_GROUPS, plot_all
+from training_data import PlotContext
+from training_stats import print_training_summary
 
-HOST = 'https://www.milonme.com'
 
 DATA_FOLDER = pathlib.Path("data")
 SESSION_FILE = DATA_FOLDER / 'session.json'
@@ -94,431 +92,6 @@ def establish_session():
             break
         perform_login()
 
-def load_stats_home():
-    studio_id = ms['d']['studios']
-    user_id = ms['id']
-    response = rs.get(f'{HOST}/api/user/stats/home/{studio_id}/{user_id}')
-    response.raise_for_status()
-
-    output_folder = DATA_FOLDER / user_id / 'stats'
-    os.makedirs(output_folder, exist_ok=True)
-    with open(output_folder / 'home.json', 'w') as f:
-        f.write(response.text)
-
-    home = response.json()
-    print(f"Welcome back {home['profile']['firstname']} {home['profile']['lastname']}!")
-    print(f"Studio: {home['studio']['studioname']}")
-
-def load_devices():
-    r = rs.get(f'{HOST}/api/devices/en_US')
-    r.raise_for_status()
-
-    os.makedirs(DATA_FOLDER, exist_ok=True)
-    with open(DATA_FOLDER / 'devices.json', 'w') as f:
-        f.write(r.text)
-
-def load_stats_premium():
-    studio_id = ms['d']['studios']
-    user_id = ms['id']
-
-    output_folder = DATA_FOLDER / user_id / 'stats' / 'premium'
-    os.makedirs(output_folder, exist_ok=True)
-
-    now = datetime.datetime.now()
-    y = now.year % 100
-    m = now.month
-
-    # Get the last year and month that was already downloaded
-    files = sorted(output_folder.glob('*.json'))
-    if files:
-        last_file = files[-1]
-        last_yymm = os.path.basename(last_file)[:4]
-    else:
-        last_yymm = None
-
-    print('Downloading premium stats for the last 12 months:', end='', flush=True)
-    for i in range(13):
-        yymm = f'{y:02}{m:02}'
-        print(f" {yymm}", end='', flush=True)
-
-        response = rs.get(f'{HOST}/api/user/stats/premium/{studio_id}/{user_id}/{yymm}')
-        response.raise_for_status()
-
-        with open(output_folder / f'{yymm}.json', 'w') as f:
-            f.write(response.text)
-
-        if last_yymm and yymm == last_yymm:
-            print('\nSkipping previous months since they were already fully downloaded')
-            break
-        
-        # decrement month
-        m -= 1
-        if m == 0:
-            m = 12
-            y -= 1
-    print()
-
-def configure_date_axis(ax):
-    locator = mdates.AutoDateLocator(minticks=3, maxticks=6)
-    # Allow every month in a one-year view, including the plot margins.
-    locator.maxticks[mdates.MONTHLY] = 14
-    ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-    ax.tick_params(axis="x", labelsize=8, labelbottom=True)
-
-
-def plot_history_series(ax, times, values, label, cutoff=None):
-    """Plot the selected range, retaining a reference to the full-history peak."""
-    series = pd.Series(list(values), index=pd.DatetimeIndex(times), dtype=float)
-    series = series.replace([float("inf"), -float("inf")], float("nan")).dropna()
-    visible = series if cutoff is None or series.empty else series[series.index >= cutoff]
-    line, = ax.plot(visible.index, visible.values, label=label)
-    if series.empty:
-        return
-
-    peak = series.max()
-    color = line.get_color()
-    line.set_label(f"{label} (ATH {peak:g})")
-    ax.axhline(peak, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
-    if not visible.empty:
-        # Mark the most recent occurrence when the same maximum was reached repeatedly.
-        range_peak = visible.max()
-        peak_time = visible[visible == range_peak].index[-1]
-        ax.plot([peak_time], [range_peak], linestyle="none",
-                marker="o", markersize=5,
-                markerfacecolor=color if range_peak == peak else "white",
-                markeredgecolor=color, color=color, zorder=4)
-
-
-def explain_peak_markers(fig):
-    fig.text(0.5, 0.008,
-             "Dashed line / filled circle: all-time high    •    Hollow circle: range maximum below all-time high",
-             ha="center", fontsize=8, color="0.4")
-
-
-def mark_year_boundaries(axes):
-    for ax in axes.flat:
-        if not ax.get_visible():
-            continue
-        left, right = ax.get_xlim()
-        start = mdates.num2date(left)
-        end = mdates.num2date(right)
-        for year in range(start.year, end.year + 1):
-            boundary = datetime.datetime(year, 1, 1, tzinfo=start.tzinfo)
-            if left < mdates.date2num(boundary) < right:
-                ax.axvline(boundary, color="0.5", linewidth=0.6, alpha=0.35, zorder=0)
-
-
-def plot_weights(data, devices, output_folder, ids, cutoff=None):
-    """Plottet Eccentric und Concentric als Gewichtsdarstellung und speichert weights.png"""
-    fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True)
-    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-    fig.set_size_inches(16, 9)
-    for ax in axes.flat:
-        configure_date_axis(ax)
-        ax.yaxis.get_major_locator().set_params(integer=True)
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    for idx, device_id in enumerate(ids):
-        row = idx // axes.shape[1]
-        col = idx % axes.shape[1]
-        ax = axes[row, col]
-        # Filter für Gerät
-        data_id = data[data["device"] == device_id]
-        plot_history_series(ax, data_id["time"], data_id["eccentric"], label="Eccentric", cutoff=cutoff)
-        plot_history_series(ax, data_id["time"], data_id["concentric"], label="Concentric", cutoff=cutoff)
-        ax.set_title(devices[str(device_id)]["name"])
-        if col == 0:
-            ax.set_ylabel("Weight / kg")
-        ax.legend(loc='lower right')
-    explain_peak_markers(fig)
-    mark_year_boundaries(axes)
-    plt.savefig(output_folder / "weights.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-def plot_delta_percentage(data, devices, output_folder, ids, cutoff=None):
-    """Plottet den prozentualen Unterschied zwischen Eccentric und Concentric und speichert delta percentage.png"""
-    fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True, sharey=True)
-    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-    fig.set_size_inches(16, 9)
-    for ax in axes.flat:
-        configure_date_axis(ax)
-        ax.yaxis.get_major_locator().set_params(integer=True)
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    for idx, device_id in enumerate(ids):
-        row = idx // axes.shape[1]
-        col = idx % axes.shape[1]
-        ax = axes[row, col]
-        data_id = data[data["device"] == device_id]
-        ax.axhline(y=20, color='r', linestyle='--', label="20%")
-        percentage = (data_id["eccentric"] / data_id["concentric"] - 1) * 100
-        plot_history_series(ax, data_id["time"], percentage, label="delta %", cutoff=cutoff)
-        ax.set_title(devices[str(device_id)]["name"])
-        if col == 0:
-            ax.set_ylabel("Percentage")
-        ax.legend(loc='lower right')
-    explain_peak_markers(fig)
-    mark_year_boundaries(axes)
-    plt.savefig(output_folder / "delta percentage.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-def plot_reps(data, devices, output_folder, ids, cutoff=None):
-    """Plottet Wiederholungen (reps) und speichert reps.png"""
-    fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True, sharey=True)
-    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-    fig.set_size_inches(16, 9)
-    for ax in axes.flat:
-        configure_date_axis(ax)
-        ax.yaxis.get_major_locator().set_params(integer=True)
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    for idx, device_id in enumerate(ids):
-        row = idx // axes.shape[1]
-        col = idx % axes.shape[1]
-        ax = axes[row, col]
-        data_id = data[data["device"] == device_id]
-        ax.axhline(y=8, color='r', linestyle='--', label="8")
-        plot_history_series(ax, data_id["time"], data_id["moves"], label="reps", cutoff=cutoff)
-        ax.set_title(devices[str(device_id)]["name"])
-        if col == 0:
-            ax.set_ylabel("Repetitions")
-        ax.legend(loc='lower right')
-    explain_peak_markers(fig)
-    mark_year_boundaries(axes)
-    plt.savefig(output_folder / "reps.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-def plot_work_individual(data_training_accumulated, devices, output_folder, ids, cutoff=None):
-    fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True)
-    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-    fig.set_size_inches(16, 9)
-    for ax in axes.flat:
-        configure_date_axis(ax)
-        ax.yaxis.get_major_locator().set_params(integer=True)
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    for idx, device_id in enumerate(ids):
-        row = idx // axes.shape[1]
-        col = idx % axes.shape[1]
-        ax = axes[row, col]
-        data_id_accumulated_3 = data_training_accumulated[(data_training_accumulated["device"] == device_id) & (data_training_accumulated["sets"] == 3)]
-        plot_history_series(ax, data_id_accumulated_3["training"], data_id_accumulated_3["work"], label="3 sets", cutoff=cutoff)
-        data_id_accumulated_2 = data_training_accumulated[(data_training_accumulated["device"] == device_id) & (data_training_accumulated["sets"] == 2)]
-        plot_history_series(ax, data_id_accumulated_2["training"], data_id_accumulated_2["work"], label="2 sets", cutoff=cutoff)
-        ax.set_title(devices[str(device_id)]["name"])
-        if col == 0:
-            ax.set_ylabel("Work / kWs")
-        ax.legend(loc='lower right')
-    explain_peak_markers(fig)
-    mark_year_boundaries(axes)
-    plt.savefig(output_folder / "work_individual.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-def plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids, cutoff=None):
-        # Collect and map muscle groups to device names
-        mg_to_names = {}
-        for device_id in ids:
-            mg = devices[str(device_id)]["mg"]
-            name = devices[str(device_id)]["name"]
-            mg_to_names.setdefault(mg, set()).add(name)
-        # Convert sets to sorted lists
-        for mg in mg_to_names:
-            mg_to_names[mg] = sorted(mg_to_names[mg])
-        
-        # Collect the muscle groups for the given device ids
-        muscle_groups = sorted({devices[str(device_id)]["mg"] for device_id in ids})
-        total_plots = 1 + len(muscle_groups)  # one overall plot + one per muscle group
-
-        # Use a 2d grid with 2 columns
-        nrows = 2
-        ncols = (total_plots + nrows - 1) // nrows
-
-        # Create a figure with subplots arranged in a grid
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True)
-        fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
-        fig.set_size_inches(16, 9)
-
-        for ax in axes.flat:
-            configure_date_axis(ax)
-            ax.yaxis.get_major_locator().set_params(integer=True)
-            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-            ax.set_visible(False)
-
-        # ----- Plot 1: Total Work for All Devices -----
-        valid_3 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
-        trainings_3 = valid_3[valid_3].index
-        valid_2 = data_training_accumulated.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
-        trainings_2 = valid_2[valid_2].index
-
-        total_3 = data_training_accumulated[
-            data_training_accumulated["training"].isin(trainings_3)
-        ].groupby("training")["work"].sum()
-        total_2 = data_training_accumulated[
-            data_training_accumulated["training"].isin(trainings_2)
-        ].groupby("training")["work"].sum()
-
-        idx = 0
-        row = idx // axes.shape[1]
-        col = idx % axes.shape[1]
-        ax = axes[row, col]
-        ax.set_visible(True)
-        plot_history_series(ax, total_3.index, total_3.values, label="3 sets", cutoff=cutoff)
-        plot_history_series(ax, total_2.index, total_2.values, label="2 sets", cutoff=cutoff)
-        ax.set_title("Total Work (All Devices)")
-        if col == 0:
-            ax.set_ylabel("Work / kWs")
-        ax.legend(loc='lower right')
-        idx += 1
-
-        # ----- Plot 2+: Total Work per Muscle Group -----
-        for mg in muscle_groups:
-            row = idx // axes.shape[1]
-            col = idx % axes.shape[1]
-            ax = axes[row, col]
-            ax.set_visible(True)
-
-            # Get device ids corresponding to the current muscle group
-            mg_device_ids = [device_id for device_id in ids if devices[str(device_id)]["mg"] == mg]
-            mg_data = data_training_accumulated[data_training_accumulated["device"].isin(mg_device_ids)]
-            if mg_data.empty:
-                ax.set_title(f"{mg.capitalize()} (no devices)")
-                ax.set_ylabel("Work / kWs")
-                idx += 1
-                continue
-
-            valid_3_mg = mg_data.groupby("training")["sets"].apply(lambda x: x.eq(3).all())
-            trainings_3_mg = valid_3_mg[valid_3_mg].index
-            valid_2_mg = mg_data.groupby("training")["sets"].apply(lambda x: x.eq(2).all())
-            trainings_2_mg = valid_2_mg[valid_2_mg].index
-
-            total_3_mg = mg_data[
-            mg_data["training"].isin(trainings_3_mg)
-            ].groupby("training")["work"].sum()
-            total_2_mg = mg_data[
-            mg_data["training"].isin(trainings_2_mg)
-            ].groupby("training")["work"].sum()
-
-            plot_history_series(ax, total_3_mg.index, total_3_mg.values, label="3 sets", cutoff=cutoff)
-            plot_history_series(ax, total_2_mg.index, total_2_mg.values, label="2 sets", cutoff=cutoff)
-            device_names = ", ".join(mg_to_names[mg])
-            ax.set_title(f"{mg.capitalize()} ({device_names})")
-            if col == 0:
-                ax.set_ylabel("Work / kWs")
-            ax.legend(loc='lower right')
-            idx += 1
-
-        explain_peak_markers(fig)
-        mark_year_boundaries(axes)
-        plt.savefig(output_folder / "work_muscle_group.png", dpi=300, bbox_inches='tight')
-        plt.close(fig)
-
-
-def format_delta(delta, components=3):
-    days = delta.days
-    total_seconds = delta.seconds
-    hours, rem = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(rem, 60)
-
-    parts = [
-        ("days",    days),
-        ("hours",   hours),
-        ("minutes", minutes),
-        ("seconds", seconds),
-    ]
-    while len(parts) > 1 and parts[0][1] == 0:
-        parts.pop(0)
-    parts = parts[:components]
-    return ", ".join(f"{value} {name}" for name, value in parts)
-
-def plot_all(days=365):
-    """Führt alle Plot-Funktionen aus."""
-    user_id = ms['id']
-    output_folder = GRAPH_FOLDER / user_id
-    os.makedirs(output_folder, exist_ok=True)
-    # Geräte laden
-    with open(DATA_FOLDER / "devices.json", 'r') as file:
-        devices = json.load(file)
-    # IDs für die Plots
-    ids = [22, 17, 5, 6, 11, 19, 21, 10, 14, 13, 15, 12]
-
-    # Datenaufbereitung (wie bisher)
-    # Daten aus Premium-Stats zusammenfassen
-    data = pd.DataFrame(columns=["training", "set", "device", "time", "duration", "moves", "concentric", "eccentric", "work"])
-    premium_stats_folder = DATA_FOLDER / ms['id'] / 'stats' / 'premium'
-    for file_path in sorted(premium_stats_folder.glob("*.json")): 
-        # print(f"Processing {file_path}")
-        with open(file_path, 'r') as file:
-            jsondata = json.load(file)
-        for training in jsondata["stats"]:
-            device_count = defaultdict(int)
-            for device in training["devices"]:
-                if "moves" not in device:
-                    continue
-                device_count[device["id"]] += 1
-                data.loc[len(data)] = [
-                    training["training"]["t"],
-                    device_count[device["id"]],
-                    device["id"],
-                    device["t"],
-                    device["d"],
-                    device["moves"],
-                    device["aw"],
-                    device["adw"],
-                    device["ws"],
-                ]
-    data.sort_values(by=["time"], inplace=True)
-    data = data[data["time"] > data["time"].min() + 3 * 60 * 60]
-    data = data[~((data["device"] == 15) & (data["concentric"] == 12) & (data["eccentric"] == 14)  & (data["duration"] == 10)  & (data["moves"] == 1))]
-    
-    # Konvertierung in DateTime
-    local_tz = datetime.datetime.now().astimezone().tzinfo
-    data["time"] = pd.to_datetime(data["time"], unit='s', utc=True).dt.tz_convert(local_tz)
-    data["training"] = pd.to_datetime(data["training"], unit='s', utc=True).dt.tz_convert(local_tz)
-
-    now = datetime.datetime.now(local_tz)
-    cutoff = now - datetime.timedelta(days=days) if days > 0 else None
-
-    data_training_accumulated = pd.DataFrame(columns=["training", "sets", "device", "duration", "moves", "concentric", "eccentric", "work"])
-    for training in data["training"].unique():
-        data_training = data[data["training"] == training]
-        for device in data_training["device"].unique():
-            data_device = data_training[data_training["device"] == device]
-            data_training_accumulated.loc[len(data_training_accumulated)] = [
-                training,
-                data_device.shape[0],
-                device,
-                data_device["duration"].sum(),
-                data_device["moves"].sum(),
-                data_device["concentric"].mean(),
-                data_device["eccentric"].mean(),
-                data_device["work"].sum(),
-            ]
-
-    history = data
-    if cutoff is not None:
-        data = data[data["training"] >= cutoff]
-
-    num_trainings = len(data["training"].unique())
-    if num_trainings == 0:
-        period = f" in the last {days} days" if days > 0 else ""
-        print(f"No trainings found{period}. Skipping stats and plots.")
-        return
-    print(f"Total number of trainings: {num_trainings}")
-    print(f"Total reps: {data['moves'].sum()}")
-    first_training = data["training"].min()
-    print(f"First training: {first_training} ({format_delta(now - first_training)} ago)")
-    last_training = data["training"].max()
-    print(f"Last training: {last_training} ({format_delta(now - last_training)} ago)")
-    print(f"Average time between trainings: {format_delta((last_training - first_training) / num_trainings)}")
-    print(f"Total work: {data['work'].sum() / 3600:.2f} kWh")
-    total_duration = datetime.timedelta(seconds=int(data["duration"].sum()))
-    print(f"Total active time: {format_delta(total_duration)}")
-    print(f"Active time per training: {format_delta(total_duration / num_trainings)}")
-
-    # Aufruf der einzelnen Plot-Funktionen
-    plot_weights(history, devices, output_folder, ids, cutoff=cutoff)
-    plot_delta_percentage(history, devices, output_folder, ids, cutoff=cutoff)
-    plot_reps(history, devices, output_folder, ids, cutoff=cutoff)
-    plot_work_individual(data_training_accumulated, devices, output_folder, ids, cutoff=cutoff)
-    plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids, cutoff=cutoff)
-
 def parse_range(value):
     if value == "all":
         return 0
@@ -530,18 +103,28 @@ def parse_range(value):
 
 
 def main():
+    global ms
     parser = argparse.ArgumentParser(description="Download and plot Milon Me training data.")
     parser.add_argument(
         "--range", type=parse_range, default="1y", metavar="RANGE",
         help="range for stats and plots: e.g. 365d, 4w, 1y, or all (default: 1y; a year is 365 days)",
     )
+    parser.add_argument("--offline", action="store_true", help="plot cached data without logging in or downloading")
+    parser.add_argument("--plots", nargs="+", choices=tuple(PLOT_GROUPS), metavar="GROUP",
+                        help="plot selected groups: " + ", ".join(PLOT_GROUPS) + " (default: all)")
     args = parser.parse_args()
-    # delete_session()
-    establish_session()
-    load_stats_home()
-    load_devices()
-    load_stats_premium()
-    plot_all(days=args.range)
+    if args.offline:
+        try:
+            with open(SESSION_FILE) as file:
+                ms = json.load(file)["session"]
+        except (OSError, ValueError, KeyError):
+            parser.error("offline mode requires a saved session identifying the user")
+    else:
+        establish_session()
+        download_all(rs, ms["id"], ms["d"]["studios"], DATA_FOLDER)
+    context = PlotContext.load(ms["id"], DATA_FOLDER, GRAPH_FOLDER, days=args.range)
+    print_training_summary(context)
+    plot_all(context, groups=args.plots)
 
 if __name__ == "__main__":
     main()
