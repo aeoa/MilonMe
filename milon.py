@@ -1,3 +1,5 @@
+import argparse
+import re
 import requests
 import json
 import os
@@ -156,14 +158,64 @@ def load_stats_premium():
             y -= 1
     print()
 
-def plot_weights(data, devices, output_folder, ids):
+def configure_date_axis(ax):
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=6)
+    # Allow every month in a one-year view, including the plot margins.
+    locator.maxticks[mdates.MONTHLY] = 14
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.tick_params(axis="x", labelsize=8, labelbottom=True)
+
+
+def plot_history_series(ax, times, values, label, cutoff=None):
+    """Plot the selected range, retaining a reference to the full-history peak."""
+    series = pd.Series(list(values), index=pd.DatetimeIndex(times), dtype=float)
+    series = series.replace([float("inf"), -float("inf")], float("nan")).dropna()
+    visible = series if cutoff is None or series.empty else series[series.index >= cutoff]
+    line, = ax.plot(visible.index, visible.values, label=label)
+    if series.empty:
+        return
+
+    peak = series.max()
+    color = line.get_color()
+    line.set_label(f"{label} (ATH {peak:g})")
+    ax.axhline(peak, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
+    if not visible.empty:
+        # Mark the most recent occurrence when the same maximum was reached repeatedly.
+        range_peak = visible.max()
+        peak_time = visible[visible == range_peak].index[-1]
+        ax.plot([peak_time], [range_peak], linestyle="none",
+                marker="o", markersize=5,
+                markerfacecolor=color if range_peak == peak else "white",
+                markeredgecolor=color, color=color, zorder=4)
+
+
+def explain_peak_markers(fig):
+    fig.text(0.5, 0.008,
+             "Dashed line / filled circle: all-time high    •    Hollow circle: range maximum below all-time high",
+             ha="center", fontsize=8, color="0.4")
+
+
+def mark_year_boundaries(axes):
+    for ax in axes.flat:
+        if not ax.get_visible():
+            continue
+        left, right = ax.get_xlim()
+        start = mdates.num2date(left)
+        end = mdates.num2date(right)
+        for year in range(start.year, end.year + 1):
+            boundary = datetime.datetime(year, 1, 1, tzinfo=start.tzinfo)
+            if left < mdates.date2num(boundary) < right:
+                ax.axvline(boundary, color="0.5", linewidth=0.6, alpha=0.35, zorder=0)
+
+
+def plot_weights(data, devices, output_folder, ids, cutoff=None):
     """Plottet Eccentric und Concentric als Gewichtsdarstellung und speichert weights.png"""
     fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True)
-    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
     fig.set_size_inches(16, 9)
     for ax in axes.flat:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        configure_date_axis(ax)
         ax.yaxis.get_major_locator().set_params(integer=True)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     for idx, device_id in enumerate(ids):
@@ -172,25 +224,24 @@ def plot_weights(data, devices, output_folder, ids):
         ax = axes[row, col]
         # Filter für Gerät
         data_id = data[data["device"] == device_id]
-        ax.plot(data_id["time"], data_id["eccentric"], label="Eccentric")
-        ax.plot(data_id["time"], data_id["concentric"], label="Concentric")
+        plot_history_series(ax, data_id["time"], data_id["eccentric"], label="Eccentric", cutoff=cutoff)
+        plot_history_series(ax, data_id["time"], data_id["concentric"], label="Concentric", cutoff=cutoff)
         ax.set_title(devices[str(device_id)]["name"])
-        if row == axes.shape[0] - 1:
-            ax.set_xlabel("Time")
         if col == 0:
             ax.set_ylabel("Weight / kg")
         ax.legend(loc='lower right')
+    explain_peak_markers(fig)
+    mark_year_boundaries(axes)
     plt.savefig(output_folder / "weights.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_delta_percentage(data, devices, output_folder, ids):
+def plot_delta_percentage(data, devices, output_folder, ids, cutoff=None):
     """Plottet den prozentualen Unterschied zwischen Eccentric und Concentric und speichert delta percentage.png"""
     fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True, sharey=True)
-    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
     fig.set_size_inches(16, 9)
     for ax in axes.flat:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        configure_date_axis(ax)
         ax.yaxis.get_major_locator().set_params(integer=True)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     for idx, device_id in enumerate(ids):
@@ -200,24 +251,23 @@ def plot_delta_percentage(data, devices, output_folder, ids):
         data_id = data[data["device"] == device_id]
         ax.axhline(y=20, color='r', linestyle='--', label="20%")
         percentage = (data_id["eccentric"] / data_id["concentric"] - 1) * 100
-        ax.plot(data_id["time"], percentage, label="delta %")
+        plot_history_series(ax, data_id["time"], percentage, label="delta %", cutoff=cutoff)
         ax.set_title(devices[str(device_id)]["name"])
-        if row == axes.shape[0] - 1:
-            ax.set_xlabel("Time")
         if col == 0:
             ax.set_ylabel("Percentage")
         ax.legend(loc='lower right')
+    explain_peak_markers(fig)
+    mark_year_boundaries(axes)
     plt.savefig(output_folder / "delta percentage.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_reps(data, devices, output_folder, ids):
+def plot_reps(data, devices, output_folder, ids, cutoff=None):
     """Plottet Wiederholungen (reps) und speichert reps.png"""
     fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True, sharey=True)
-    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
     fig.set_size_inches(16, 9)
     for ax in axes.flat:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        configure_date_axis(ax)
         ax.yaxis.get_major_locator().set_params(integer=True)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     for idx, device_id in enumerate(ids):
@@ -226,23 +276,22 @@ def plot_reps(data, devices, output_folder, ids):
         ax = axes[row, col]
         data_id = data[data["device"] == device_id]
         ax.axhline(y=8, color='r', linestyle='--', label="8")
-        ax.plot(data_id["time"], data_id["moves"], label="reps")
+        plot_history_series(ax, data_id["time"], data_id["moves"], label="reps", cutoff=cutoff)
         ax.set_title(devices[str(device_id)]["name"])
-        if row == axes.shape[0] - 1:
-            ax.set_xlabel("Time")
         if col == 0:
             ax.set_ylabel("Repetitions")
         ax.legend(loc='lower right')
+    explain_peak_markers(fig)
+    mark_year_boundaries(axes)
     plt.savefig(output_folder / "reps.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_work_individual(data_training_accumulated, devices, output_folder, ids):
+def plot_work_individual(data_training_accumulated, devices, output_folder, ids, cutoff=None):
     fig, axes = plt.subplots(nrows=3, ncols=4, sharex=True)
-    fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+    fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
     fig.set_size_inches(16, 9)
     for ax in axes.flat:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        configure_date_axis(ax)
         ax.yaxis.get_major_locator().set_params(integer=True)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     for idx, device_id in enumerate(ids):
@@ -250,19 +299,19 @@ def plot_work_individual(data_training_accumulated, devices, output_folder, ids)
         col = idx % axes.shape[1]
         ax = axes[row, col]
         data_id_accumulated_3 = data_training_accumulated[(data_training_accumulated["device"] == device_id) & (data_training_accumulated["sets"] == 3)]
-        ax.plot(data_id_accumulated_3["training"], data_id_accumulated_3["work"], label="3 sets")
+        plot_history_series(ax, data_id_accumulated_3["training"], data_id_accumulated_3["work"], label="3 sets", cutoff=cutoff)
         data_id_accumulated_2 = data_training_accumulated[(data_training_accumulated["device"] == device_id) & (data_training_accumulated["sets"] == 2)]
-        ax.plot(data_id_accumulated_2["training"], data_id_accumulated_2["work"], label="2 sets")
+        plot_history_series(ax, data_id_accumulated_2["training"], data_id_accumulated_2["work"], label="2 sets", cutoff=cutoff)
         ax.set_title(devices[str(device_id)]["name"])
-        if row == axes.shape[0] - 1:
-            ax.set_xlabel("Time")
         if col == 0:
             ax.set_ylabel("Work / kWs")
         ax.legend(loc='lower right')
+    explain_peak_markers(fig)
+    mark_year_boundaries(axes)
     plt.savefig(output_folder / "work_individual.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-def plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids):
+def plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids, cutoff=None):
         # Collect and map muscle groups to device names
         mg_to_names = {}
         for device_id in ids:
@@ -283,12 +332,11 @@ def plot_work_muscle_group(data_training_accumulated, devices, output_folder, id
 
         # Create a figure with subplots arranged in a grid
         fig, axes = plt.subplots(nrows=nrows, ncols=ncols, sharex=True)
-        fig.subplots_adjust(left=0.04, bottom=0.05, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
+        fig.subplots_adjust(left=0.04, bottom=0.085, right=0.98, top=0.965, wspace=0.15, hspace=0.28)
         fig.set_size_inches(16, 9)
 
         for ax in axes.flat:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-            ax.xaxis.set_major_locator(mdates.MonthLocator())
+            configure_date_axis(ax)
             ax.yaxis.get_major_locator().set_params(integer=True)
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
             ax.set_visible(False)
@@ -311,11 +359,9 @@ def plot_work_muscle_group(data_training_accumulated, devices, output_folder, id
         col = idx % axes.shape[1]
         ax = axes[row, col]
         ax.set_visible(True)
-        ax.plot(total_3.index, total_3.values, label="3 sets")
-        ax.plot(total_2.index, total_2.values, label="2 sets")
+        plot_history_series(ax, total_3.index, total_3.values, label="3 sets", cutoff=cutoff)
+        plot_history_series(ax, total_2.index, total_2.values, label="2 sets", cutoff=cutoff)
         ax.set_title("Total Work (All Devices)")
-        if row == axes.shape[0] - 1:
-            ax.set_xlabel("Time")
         if col == 0:
             ax.set_ylabel("Work / kWs")
         ax.legend(loc='lower right')
@@ -333,7 +379,6 @@ def plot_work_muscle_group(data_training_accumulated, devices, output_folder, id
             mg_data = data_training_accumulated[data_training_accumulated["device"].isin(mg_device_ids)]
             if mg_data.empty:
                 ax.set_title(f"{mg.capitalize()} (no devices)")
-                ax.set_xlabel("Time")
                 ax.set_ylabel("Work / kWs")
                 idx += 1
                 continue
@@ -350,17 +395,17 @@ def plot_work_muscle_group(data_training_accumulated, devices, output_folder, id
             mg_data["training"].isin(trainings_2_mg)
             ].groupby("training")["work"].sum()
 
-            ax.plot(total_3_mg.index, total_3_mg.values, label="3 sets")
-            ax.plot(total_2_mg.index, total_2_mg.values, label="2 sets")
+            plot_history_series(ax, total_3_mg.index, total_3_mg.values, label="3 sets", cutoff=cutoff)
+            plot_history_series(ax, total_2_mg.index, total_2_mg.values, label="2 sets", cutoff=cutoff)
             device_names = ", ".join(mg_to_names[mg])
             ax.set_title(f"{mg.capitalize()} ({device_names})")
-            if row == axes.shape[0] - 1:
-                ax.set_xlabel("Time")
             if col == 0:
                 ax.set_ylabel("Work / kWs")
             ax.legend(loc='lower right')
             idx += 1
 
+        explain_peak_markers(fig)
+        mark_year_boundaries(axes)
         plt.savefig(output_folder / "work_muscle_group.png", dpi=300, bbox_inches='tight')
         plt.close(fig)
 
@@ -382,7 +427,7 @@ def format_delta(delta, components=3):
     parts = parts[:components]
     return ", ".join(f"{value} {name}" for name, value in parts)
 
-def plot_all():
+def plot_all(days=365):
     """Führt alle Plot-Funktionen aus."""
     user_id = ms['id']
     output_folder = GRAPH_FOLDER / user_id
@@ -422,6 +467,14 @@ def plot_all():
     data = data[data["time"] > data["time"].min() + 3 * 60 * 60]
     data = data[~((data["device"] == 15) & (data["concentric"] == 12) & (data["eccentric"] == 14)  & (data["duration"] == 10)  & (data["moves"] == 1))]
     
+    # Konvertierung in DateTime
+    local_tz = datetime.datetime.now().astimezone().tzinfo
+    data["time"] = pd.to_datetime(data["time"], unit='s', utc=True).dt.tz_convert(local_tz)
+    data["training"] = pd.to_datetime(data["training"], unit='s', utc=True).dt.tz_convert(local_tz)
+
+    now = datetime.datetime.now(local_tz)
+    cutoff = now - datetime.timedelta(days=days) if days > 0 else None
+
     data_training_accumulated = pd.DataFrame(columns=["training", "sets", "device", "duration", "moves", "concentric", "eccentric", "work"])
     for training in data["training"].unique():
         data_training = data[data["training"] == training]
@@ -437,16 +490,18 @@ def plot_all():
                 data_device["eccentric"].mean(),
                 data_device["work"].sum(),
             ]
-    # Konvertierung in DateTime
-    local_tz = datetime.datetime.now().astimezone().tzinfo
-    data["time"] = pd.to_datetime(data["time"], unit='s', utc=True).dt.tz_convert(local_tz)
-    data["training"] = pd.to_datetime(data["training"], unit='s', utc=True).dt.tz_convert(local_tz)
-    data_training_accumulated["training"] = pd.to_datetime(data_training_accumulated["training"], unit='s', utc=True).dt.tz_convert(local_tz)
+
+    history = data
+    if cutoff is not None:
+        data = data[data["training"] >= cutoff]
 
     num_trainings = len(data["training"].unique())
+    if num_trainings == 0:
+        period = f" in the last {days} days" if days > 0 else ""
+        print(f"No trainings found{period}. Skipping stats and plots.")
+        return
     print(f"Total number of trainings: {num_trainings}")
     print(f"Total reps: {data['moves'].sum()}")
-    now = datetime.datetime.now(local_tz)
     first_training = data["training"].min()
     print(f"First training: {first_training} ({format_delta(now - first_training)} ago)")
     last_training = data["training"].max()
@@ -458,19 +513,35 @@ def plot_all():
     print(f"Active time per training: {format_delta(total_duration / num_trainings)}")
 
     # Aufruf der einzelnen Plot-Funktionen
-    plot_weights(data, devices, output_folder, ids)
-    plot_delta_percentage(data, devices, output_folder, ids)
-    plot_reps(data, devices, output_folder, ids)
-    plot_work_individual(data_training_accumulated, devices, output_folder, ids)
-    plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids)
+    plot_weights(history, devices, output_folder, ids, cutoff=cutoff)
+    plot_delta_percentage(history, devices, output_folder, ids, cutoff=cutoff)
+    plot_reps(history, devices, output_folder, ids, cutoff=cutoff)
+    plot_work_individual(data_training_accumulated, devices, output_folder, ids, cutoff=cutoff)
+    plot_work_muscle_group(data_training_accumulated, devices, output_folder, ids, cutoff=cutoff)
+
+def parse_range(value):
+    if value == "all":
+        return 0
+    match = re.fullmatch(r"([1-9][0-9]*)([dwy])", value)
+    if match is None:
+        raise argparse.ArgumentTypeError("use a positive duration such as 365d, 4w, or 1y, or 'all'")
+    amount, unit = match.groups()
+    return int(amount) * {"d": 1, "w": 7, "y": 365}[unit]
+
 
 def main():
+    parser = argparse.ArgumentParser(description="Download and plot Milon Me training data.")
+    parser.add_argument(
+        "--range", type=parse_range, default="1y", metavar="RANGE",
+        help="range for stats and plots: e.g. 365d, 4w, 1y, or all (default: 1y; a year is 365 days)",
+    )
+    args = parser.parse_args()
     # delete_session()
     establish_session()
     load_stats_home()
     load_devices()
     load_stats_premium()
-    plot_all()
+    plot_all(days=args.range)
 
 if __name__ == "__main__":
     main()
