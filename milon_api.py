@@ -51,15 +51,14 @@ def download_all(session, user_id, studio_id, data_folder):
     fetch("home", f"/api/user/stats/home/{studio_id}/{user_id}")
     fetch("devices", "/api/devices/en_US", destination=data_folder / "devices.json")
 
-    # Refresh the newest cached month too: it may have been partial on the last run.
+    # Refresh current/newest cached months and retry gaps in the full window.
     files = sorted((stats / "premium").glob("[0-9][0-9][0-9][0-9].json"))
     last_yymm = files[-1].stem if files else None
     year, month = now.year, now.month
-    for _ in range(13):
+    for offset in range(13):
         yymm = f"{year % 100:02}{month:02}"
-        fetch(f"premium/{yymm}", f"/api/user/stats/premium/{studio_id}/{user_id}/{yymm}")
-        if yymm == last_yymm:
-            break
+        if offset == 0 or yymm == last_yymm or not (stats / "premium" / f"{yymm}.json").exists():
+            fetch(f"premium/{yymm}", f"/api/user/stats/premium/{studio_id}/{user_id}/{yymm}")
         month -= 1
         if month == 0:
             month = 12
