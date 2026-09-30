@@ -1,4 +1,5 @@
 import contextlib
+import datetime as dt
 import io
 import tempfile
 import unittest
@@ -14,6 +15,46 @@ from training_plots import PLOT_GROUPS, aggregate_frame, plot_all
 
 
 class HistoryTests(unittest.TestCase):
+    def test_download_retries_missing_month_after_partial_backfill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stats = Path(directory) / "user" / "stats"
+            months = [f"26{month:02}" for month in range(9, 0, -1)] + ["2512", "2511", "2510", "2509"]
+            missing = months[-1]
+            session = Mock()
+            fail_missing = True
+
+            def get(url, timeout):
+                if "/stats/premium/" not in url:
+                    raise requests.Timeout()
+                if url.endswith(f"/{missing}") and fail_missing:
+                    raise requests.Timeout()
+                response = Mock()
+                response.json.return_value = {"stats": []}
+                return response
+
+            def requested_months():
+                return [call.args[0].rsplit("/", 1)[-1] for call in session.get.call_args_list
+                        if "/stats/premium/" in call.args[0]]
+
+            session.get.side_effect = get
+            now = dt.datetime(2026, 9, 30, tzinfo=dt.timezone.utc)
+            with patch("milon_api.dt.datetime") as clock, contextlib.redirect_stdout(io.StringIO()):
+                clock.now.return_value = now
+                download_all(session, "user", "studio", directory)
+                self.assertEqual(requested_months(), months)
+                self.assertFalse((stats / "premium" / f"{missing}.json").exists())
+                self.assertTrue((stats / "premium" / f"{months[0]}.json").exists())
+
+                fail_missing = False
+                session.get.reset_mock()
+                download_all(session, "user", "studio", directory)
+                self.assertEqual(requested_months(), [months[0], missing])
+                self.assertEqual(read_json(stats / "premium" / f"{missing}.json"), {"stats": []})
+
+                session.get.reset_mock()
+                download_all(session, "user", "studio", directory)
+                self.assertEqual(requested_months(), [months[0]])
+
     def test_bioage_rollover_and_revision(self):
         old = [{"t": 1, "bioAge": 30}, {"t": 2, "bioAge": 31}]
         new = [{"t": 2, "bioAge": 30.5}, {"t": 3, "bioAge": 32}]
